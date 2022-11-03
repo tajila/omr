@@ -4197,6 +4197,20 @@ MM_Scavenger::mainThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_AllocateD
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
 	Trc_MM_Scavenger_mainThreadGarbageCollect_Entry(env->getLanguageVMThread());
 
+//	if (_dispatcher->_checkpoint) {
+//		int nextThreadCount = _extensions->gcThreadCount - 2;
+//
+//		if(nextThreadCount <= 0) {
+//			nextThreadCount = 1;
+//			_dispatcher->_checkpoint = false;
+//		}
+//
+//		_dispatcher->checkpointDispatcher(env, nextThreadCount);
+//
+//		Assert_MM_true(_extensions->gcThreadCount == ((uintptr_t) nextThreadCount));
+//		Assert_MM_true(_dispatcher->threadCountMaximum() == ((uintptr_t) nextThreadCount));
+//	}
+
 	/* We might be running in a context of either main or main thread, but either way we must have exclusive access */
 	Assert_MM_mustHaveExclusiveVMAccess(env->getOmrVMThread());
 
@@ -4262,7 +4276,7 @@ MM_Scavenger::mainThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_AllocateD
 
 		if(scavengeCompletedSuccessfully(env)) {
 
-			calculateRecommendedWorkingThreads(env);
+			//calculateRecommendedWorkingThreads(env);
 
 			/* Merge sublists in the remembered set (if necessary) */
 			_extensions->rememberedSet.compact(env);
@@ -4348,6 +4362,20 @@ MM_Scavenger::mainThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_AllocateD
 		/* Done doing GC, reset the category back to the old one */
 		omrthread_set_category(env->getOmrVMThread()->_os_thread, 0, J9THREAD_TYPE_SET_GC);
 	}
+
+//	if (!_dispatcher->_checkpoint) {
+//		uintptr_t nextThreadCount = _extensions->gcThreadCount + 2;
+//
+//		if(nextThreadCount > _dispatcher->_threadCountAtInit) {
+//			nextThreadCount = _dispatcher->_threadCountAtInit;
+//			_dispatcher->_checkpoint = true;
+//		}
+//
+//		_dispatcher->restoreDispatcher(env, nextThreadCount);
+//
+//		Assert_MM_true(_extensions->gcThreadCount ==  nextThreadCount);
+//		Assert_MM_true(_dispatcher->threadCountMaximum() ==  nextThreadCount);
+//	}
 
 	Trc_MM_Scavenger_mainThreadGarbageCollect_Exit(env->getLanguageVMThread());
 }

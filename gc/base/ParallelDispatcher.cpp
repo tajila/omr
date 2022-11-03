@@ -258,7 +258,8 @@ MM_ParallelDispatcher::initialize(MM_EnvironmentBase *env)
 {
 	OMR::GC::Forge *forge = env->getForge();
 
-	_threadCountMaximum = env->getExtensions()->gcThreadCount;
+	_threadCountMaximum = _threadCountAtInit = env->getExtensions()->gcThreadCount;
+
 	Assert_MM_true(0 < _threadCountMaximum);
 
 	if(omrthread_monitor_init_with_name(&_workerThreadMutex, 0, "MM_ParallelDispatcher::workerThread")
@@ -464,16 +465,16 @@ MM_ParallelDispatcher::recomputeActiveThreadCountForTask(MM_EnvironmentBase *env
 	 *  2) Adaptive threading flag is not set (-XX:-AdaptiveGCThreading)
 	 *  3) or simply the task wasn't recommended a thread count (currently only recommended for STW Scavenge Tasks)
 	 */
-	if (task->getRecommendedWorkingThreads() != UDATA_MAX) {
-		/* Bound the recommended thread count. Determine the  upper bound for the thread count,
-		 * This will either be the user specified gcMaxThreadCount (-XgcmaxthreadsN) or else default max
-		 */
-		taskActiveThreadCount = OMR_MIN(_threadCount, task->getRecommendedWorkingThreads());
-
-		_activeThreadCount = taskActiveThreadCount;
-
-		Trc_MM_ParallelDispatcher_recomputeActiveThreadCountForTask_useCollectorRecommendedThreads(task->getRecommendedWorkingThreads(), taskActiveThreadCount);
-	}
+//	if (task->getRecommendedWorkingThreads() != UDATA_MAX) {
+//		/* Bound the recommended thread count. Determine the  upper bound for the thread count,
+//		 * This will either be the user specified gcMaxThreadCount (-XgcmaxthreadsN) or else default max
+//		 */
+//		taskActiveThreadCount = OMR_MIN(_threadCount, task->getRecommendedWorkingThreads());
+//
+//		_activeThreadCount = taskActiveThreadCount;
+//
+//		Trc_MM_ParallelDispatcher_recomputeActiveThreadCountForTask_useCollectorRecommendedThreads(task->getRecommendedWorkingThreads(), taskActiveThreadCount);
+//	}
 
 	task->setThreadCount(taskActiveThreadCount);
  	return taskActiveThreadCount;
@@ -484,28 +485,28 @@ MM_ParallelDispatcher::adjustThreadCount(uintptr_t maxThreadCount)
 {
 	uintptr_t toReturn = maxThreadCount;
 	
-	/* Did user specify number of gc threads? */
-	if(!_extensions->gcThreadCountForced) {
-		/* No ...Use a sensible number of threads for current heap size. Using too many 
-		 * can lead to unacceptable pause times due to insufficient parallelism. Additionally,
-		 * it can lead to excessive fragmentation, causing aborts and percolates. 
-		 */
-		MM_Heap *heap = (MM_Heap *)_extensions->heap;
-		uintptr_t heapSize = heap->getActiveMemorySize();
-		uintptr_t maximumThreadsForHeapSize = (heapSize > MINIMUM_HEAP_PER_THREAD) ?  heapSize / MINIMUM_HEAP_PER_THREAD : 1;
-		if (maximumThreadsForHeapSize < maxThreadCount) {
-			Trc_MM_ParallelDispatcher_adjustThreadCount_smallHeap(maximumThreadsForHeapSize);
-			toReturn = maximumThreadsForHeapSize;
-		}
-
-		OMRPORT_ACCESS_FROM_OMRVM(_extensions->getOmrVM());
-		/* No, use the current active CPU count (unless it would overflow our threadtables) */
-		uintptr_t activeCPUs = omrsysinfo_get_number_CPUs_by_type(OMRPORT_CPU_TARGET);
-		if (activeCPUs < toReturn) {
-			Trc_MM_ParallelDispatcher_adjustThreadCount_ReducedCPU(activeCPUs);
-			toReturn = activeCPUs;
-		}
-	}
+//	/* Did user specify number of gc threads? */
+//	if(!_extensions->gcThreadCountForced) {
+//		/* No ...Use a sensible number of threads for current heap size. Using too many
+//		 * can lead to unacceptable pause times due to insufficient parallelism. Additionally,
+//		 * it can lead to excessive fragmentation, causing aborts and percolates.
+//		 */
+//		MM_Heap *heap = (MM_Heap *)_extensions->heap;
+//		uintptr_t heapSize = heap->getActiveMemorySize();
+//		uintptr_t maximumThreadsForHeapSize = (heapSize > MINIMUM_HEAP_PER_THREAD) ?  heapSize / MINIMUM_HEAP_PER_THREAD : 1;
+//		if (maximumThreadsForHeapSize < maxThreadCount) {
+//			Trc_MM_ParallelDispatcher_adjustThreadCount_smallHeap(maximumThreadsForHeapSize);
+//			toReturn = maximumThreadsForHeapSize;
+//		}
+//
+//		OMRPORT_ACCESS_FROM_OMRVM(_extensions->getOmrVM());
+//		/* No, use the current active CPU count (unless it would overflow our threadtables) */
+//		uintptr_t activeCPUs = omrsysinfo_get_number_CPUs_by_type(OMRPORT_CPU_TARGET);
+//		if (activeCPUs < toReturn) {
+//			Trc_MM_ParallelDispatcher_adjustThreadCount_ReducedCPU(activeCPUs);
+//			toReturn = activeCPUs;
+//		}
+//	}
 	
 	return toReturn;
 }
@@ -630,3 +631,166 @@ MM_ParallelDispatcher::reinitAfterFork(MM_EnvironmentBase *env, uintptr_t newThr
 
 	startUpThreads();
 }
+
+#if defined(J9VM_OPT_CRIU_SUPPORT)
+void
+MM_ParallelDispatcher::shutDownThreads(MM_EnvironmentBase *env, uintptr_t newThreadCount)
+{
+	OMRPORT_ACCESS_FROM_OMRPORT(env->getPortLibrary());
+
+	//TODO: Possible to be starting up threads while here?
+
+	Assert_MM_false(_workerThreadsReservedForGC);
+	Assert_MM_true(_threadShutdownCount == _threadCountMaximum - 1);
+	Assert_MM_true(_task == NULL);
+	Assert_MM_true(_inShutdown == false);
+
+	if (_extensions->debugGCcheckpoint) {
+		omrtty_printf(" > checkpointDispatcher [_threadCountMaximum: %i] \n", _threadCountMaximum);
+	}
+
+	if (_threadCountMaximum > newThreadCount) {
+
+		uintptr_t oldCount = _extensions->gcThreadCount;
+
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" \t # checkpointGCthreadCount:  %i \n", newThreadCount);
+		}
+
+		Assert_MM_true(_threadShutdownCount >= newThreadCount);
+
+		_inShutdown = true;
+
+		omrthread_monitor_enter(_workerThreadMutex);
+
+		/* Set the worker thread mode to dying */
+		for(uintptr_t index = newThreadCount; index < _threadCountMaximum; index++) {
+			_statusTable[index] = worker_status_dying;
+		}
+
+		omrthread_monitor_notify_all(_workerThreadMutex); //wake up threads
+
+		omrthread_monitor_exit(_workerThreadMutex);
+
+		omrthread_monitor_enter(_dispatcherMonitor);
+		while ((newThreadCount - 1) != _threadShutdownCount) {
+			omrthread_monitor_wait(_dispatcherMonitor);
+		}
+		omrthread_monitor_exit(_dispatcherMonitor);
+
+		//We'll recompute _activeThreadCount on restore. For now set it to max, can't compute it as it will try to check
+		// this machines active cpus
+		/* Set the worker thread mode to dying */
+		for(uintptr_t index = newThreadCount; index < _threadCountMaximum; index++) {
+			_statusTable[index] = worker_status_inactive;
+			_threadTable[index] = NULL;
+		}
+
+		_threadCount = _activeThreadCount = _threadCountMaximum = newThreadCount;
+		_extensions->gcThreadCount = newThreadCount;
+
+		Assert_MM_true(_threadShutdownCount == (newThreadCount - 1));
+
+
+
+		_inShutdown = false;
+
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" < checkpointDispatcher SUCCESS  [%i -> %i] \n", oldCount, newThreadCount);
+		}
+
+	} else {
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" < checkpointDispatcher SKIP \n");
+		}
+	}
+}
+
+void
+MM_ParallelDispatcher::startUpThreads(MM_EnvironmentBase *env, uintptr_t newThreadCount)
+{
+	OMRPORT_ACCESS_FROM_OMRPORT(env->getPortLibrary());
+
+	Assert_MM_false(_workerThreadsReservedForGC);
+	Assert_MM_true(_threadShutdownCount == (_threadCountMaximum - 1));
+	Assert_MM_true(_task == NULL);
+	Assert_MM_true(_inShutdown == false);
+
+	if (_extensions->debugGCcheckpoint) {
+		omrtty_printf(" > restoreDispatcher [_threadCountMaximum: %i] \n", _threadCountMaximum);
+	}
+
+	if (_threadCountMaximum < newThreadCount) {
+		uintptr_t oldCount = _extensions->gcThreadCount;
+
+		intptr_t threadForkResult;
+		uintptr_t workerThreadCount = _threadCountMaximum;
+
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" \t # restoreDispatcherThreadCount:  %i \n", newThreadCount);
+		}
+
+		//newThreadCount = 5
+		//Max = 2
+		// workerThreadCount = _threadCountMaximum = 2
+		// workerThreadCount < newThreadCount -->  2 < 5
+
+		/* Fork the worker threads */
+		workerThreadInfo workerInfo;
+		workerInfo.omrVM = _extensions->getOmrVM();
+		workerInfo.dispatcher = this;
+
+		omrthread_monitor_enter(_dispatcherMonitor);
+
+		while (workerThreadCount < newThreadCount) {
+			workerInfo.workerFlags = 0;
+			workerInfo.workerID = workerThreadCount;
+
+			Assert_MM_true(_threadTable[workerThreadCount] == NULL);
+			Assert_MM_true(_statusTable[workerThreadCount] == worker_status_inactive);
+
+			threadForkResult =
+				createThreadWithCategory(
+					&(_threadTable[workerThreadCount]),
+					_defaultOSStackSize,
+					getThreadPriority(),
+					0,
+					dispatcher_thread_proc,
+					(void *)&workerInfo,
+					J9THREAD_CATEGORY_SYSTEM_GC_THREAD);
+			if (threadForkResult != 0) {
+				Assert_MM_unreachable();
+			}
+			do {
+				if(_inShutdown) {
+					Assert_MM_unreachable();
+				}
+				omrthread_monitor_wait(_dispatcherMonitor);
+			} while (!workerInfo.workerFlags);
+
+			if(workerInfo.workerFlags != WORKER_INFO_FLAG_OK ) {
+				Assert_MM_unreachable();
+			}
+
+			_threadShutdownCount += 1;
+			workerThreadCount += 1;
+		}
+		omrthread_monitor_exit(_dispatcherMonitor);
+
+		_threadCount = _activeThreadCount = _threadCountMaximum = newThreadCount;
+
+		_extensions->gcThreadCountForced = true;
+		_extensions->gcThreadCount = newThreadCount;
+
+		Assert_MM_true(_threadShutdownCount == (newThreadCount -1));
+
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" < restoreDispatcher SUCCESS  [%i -> %i] \n", oldCount, newThreadCount);
+		}
+	} else {
+		if (_extensions->debugGCcheckpoint) {
+			omrtty_printf(" < restoreDispatcher SKIP \n");
+		}
+	}
+}
+#endif /* defined(J9VM_OPT_CRIU_SUPPORT) */

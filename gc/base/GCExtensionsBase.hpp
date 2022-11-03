@@ -616,6 +616,12 @@ public:
 
 	MM_ParallelDispatcher* dispatcher;
 
+#if defined(J9VM_OPT_CRIU_SUPPORT)
+	uintptr_t checkpointGCthreadCount;
+	uintptr_t restoreGCthreadCount;
+	bool debugGCcheckpoint;
+#endif /* defined(J9VM_OPT_CRIU_SUPPORT) */
+
 	MM_CardTable* cardTable;
 
 	/* Begin command line options temporary home */
@@ -1773,6 +1779,11 @@ public:
 		, fvtest_forceCardTableDecommitFailure(0)
 		, fvtest_forceCardTableDecommitFailureCounter(0)
 		, dispatcher(NULL)
+#if defined(J9VM_OPT_CRIU_SUPPORT)
+		, checkpointGCthreadCount(4)
+		, restoreGCthreadCount(4)
+		, debugGCcheckpoint(false)
+#endif /* defined(J9VM_OPT_CRIU_SUPPORT) */
 		, cardTable(NULL)
 		, memoryMax(0)
 		, initialMemorySize(0)

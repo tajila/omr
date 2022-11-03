@@ -84,6 +84,9 @@ protected:
 	uintptr_t _defaultOSStackSize; /**< default OS stack size */
 
 public:
+	uintptr_t _threadCountAtInit;
+
+	bool _checkpoint;
 
 	/*
 	 * Function members
@@ -119,6 +122,11 @@ protected:
 public:
 	virtual bool startUpThreads();
 	virtual void shutDownThreads();
+
+#if defined(J9VM_OPT_CRIU_SUPPORT)
+	void startUpThreads(MM_EnvironmentBase *env, uintptr_t newThreadCount);
+	void shutDownThreads(MM_EnvironmentBase *env, uintptr_t newThreadCount);
+#endif /* defined(J9VM_OPT_CRIU_SUPPORT) */
 
 	virtual bool condYieldFromGCWrapper(MM_EnvironmentBase *env, uint64_t timeSlack = 0) { return false; }
 	
@@ -158,6 +166,8 @@ public:
 		,_handler(handler)
 		,_handler_arg(handler_arg)
 		,_defaultOSStackSize(defaultOSStackSize)
+		,_threadCountAtInit(0)
+		,_checkpoint(true)
 	{
 		_typeId = __FUNCTION__;
 	}
